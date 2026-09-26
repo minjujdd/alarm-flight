@@ -1,21 +1,26 @@
 from datetime import datetime
 from typing import Optional
 
+from sqlalchemy import JSON, Column
 from sqlmodel import SQLModel, Field
+
+
+# EventLog.action 값
+class Action:
+    SIGNUP = "SIGNUP"
+    COUPON_ISSUED = "COUPON_ISSUED"
+    FLIGHT_SEARCH = "FLIGHT_SEARCH"
+    FLIGHT_VIEW = "FLIGHT_VIEW"
+    RESERVATION_ATTEMPT = "RESERVATION_ATTEMPT"    # 탐지까지 진행된 예약 요청
+    RESERVATION_REJECTED = "RESERVATION_REJECTED"  # 검증 실패 (좌석 부족, 쿠폰 오류 등)
+    CAPTCHA_PASSED = "CAPTCHA_PASSED"
+    CAPTCHA_FAILED = "CAPTCHA_FAILED"
+    RESERVATION_CANCELLED = "RESERVATION_CANCELLED"
 
 
 # -------------------------
 # 1. DB 테이블
 # -------------------------
-
-class EventLog(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    timestamp: datetime = Field(default_factory=datetime.now)
-    user_id: str
-    action: str
-    score: float
-    is_anomaly: bool
-
 
 # 회원
 # PostgreSQL 에서 user 는 예약어라서 테이블 이름을 users 로 지정
@@ -87,6 +92,37 @@ class Reservation(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.now)
 
 
+# 사용자 행동 로그 (탐지 결과 + AI 학습 데이터)
+class EventLog(SQLModel, table=True):
+    __tablename__ = "event_logs"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    timestamp: datetime = Field(default_factory=datetime.now, index=True)
+    user_id: Optional[int] = Field(
+        default=None, foreign_key="users.id", index=True
+    )
+    flight_id: Optional[int] = Field(default=None, foreign_key="flights.id")
+    reservation_id: Optional[int] = Field(
+        default=None, foreign_key="reservations.id"
+    )
+    action: str = Field(index=True)
+    ip: Optional[str] = Field(default=None, index=True)
+    device_id: Optional[str] = Field(default=None, index=True)
+    user_agent: Optional[str] = None
+
+    # 탐지 결과
+    rule_score: float = 0
+    ai_score: Optional[float] = None  # 0~1, AI 모델 연결 전에는 None
+    risk_score: float = 0
+    decision: Optional[str] = None  # CONFIRMED / CAPTCHA_REQUIRED / BLOCKED
+    is_anomaly: bool = Field(default=False, index=True)
+    reasons: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+
+    # AI 모델 입력용 Feature (탐지 시점 값)
+    features: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    message: Optional[str] = None
+
+
 # -------------------------
 # 2. 요청/응답 모델 (DB 테이블 아님)
 # -------------------------
@@ -132,3 +168,23 @@ class ReservationRequest(SQLModel):
     seat_count: int = 1
     coupon_id: Optional[int] = None
     device_id: Optional[str] = None
+
+
+class CouponIssueRequest(SQLModel):
+    user_id: int
+    discount_amount: int = 5000
+    coupon_type: str = "event"
+    valid_days: int = 30
+
+
+# 프론트·외부에서 직접 남기는 로그
+class LogCreate(SQLModel):
+    action: str
+    user_id: Optional[int] = None
+    flight_id: Optional[int] = None
+    device_id: Optional[str] = None
+    message: Optional[str] = None
+    rule_score: float = 0
+    ai_score: Optional[float] = None
+    risk_score: float = 0
+    is_anomaly: bool = False

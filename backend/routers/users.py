@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from typing import Optional
 import hashlib
 import secrets
 
@@ -6,9 +6,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlmodel import Session, select
 
 from database import get_session
+from events import client_ip, write_log
 from models import (
-    Coupon, Reservation, SignupRequest, SignupResponse, User, UserPublic
+    Action, Coupon, Reservation, SignupRequest, SignupResponse, User,
+    UserPublic
 )
+from routers.coupons import issue_coupon
 
 
 router = APIRouter(tags=["회원"])
@@ -25,13 +28,12 @@ def hash_password(password: str) -> str:
     return salt.hex() + ":" + digest.hex()
 
 
-# 회원가입 (+ 가입 쿠폰 자동 발급)
-@router.post("/users/signup", response_model=SignupResponse)
-def signup(
+def do_signup(
+    session: Session,
     data: SignupRequest,
-    request: Request,
-    session: Session = Depends(get_session)
-):
+    ip: Optional[str],
+    user_agent: Optional[str]
+) -> SignupResponse:
 
     exists = session.exec(
         select(User).where(User.email == data.email)
@@ -45,27 +47,44 @@ def signup(
         password_hash=hash_password(data.password),
         name=data.name,
         phone=data.phone,
-        signup_ip=request.client.host if request.client else None,
+        signup_ip=ip,
         signup_device_id=data.device_id
     )
     session.add(user)
+    session.flush()  # user.id 발급
+
+    write_log(
+        session, Action.SIGNUP,
+        user_id=user.id, ip=ip, device_id=data.device_id,
+        user_agent=user_agent
+    )
+
+    coupon = issue_coupon(
+        session, user.id, "signup",
+        SIGNUP_COUPON_DISCOUNT, SIGNUP_COUPON_DAYS,
+        ip=ip, device_id=data.device_id
+    )
+
     session.commit()
     session.refresh(user)
-
-    coupon = Coupon(
-        code=secrets.token_hex(6).upper(),
-        user_id=user.id,
-        coupon_type="signup",
-        discount_amount=SIGNUP_COUPON_DISCOUNT,
-        expires_at=datetime.now() + timedelta(days=SIGNUP_COUPON_DAYS)
-    )
-    session.add(coupon)
-    session.commit()
     session.refresh(coupon)
 
     return SignupResponse(
         user=UserPublic.model_validate(user),
         coupon=coupon
+    )
+
+
+# 회원가입 (+ 가입 쿠폰 자동 발급)
+@router.post("/users/signup", response_model=SignupResponse)
+def signup(
+    data: SignupRequest,
+    request: Request,
+    ip: Optional[str] = Depends(client_ip),
+    session: Session = Depends(get_session)
+):
+    return do_signup(
+        session, data, ip, request.headers.get("user-agent")
     )
 
 

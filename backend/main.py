@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from database import create_db_and_tables
-from routers import flights, logs, reservations, users
+from routers import coupons, flights, logs, reservations, users
 
 
 @asynccontextmanager
@@ -19,6 +19,7 @@ app = FastAPI(
 
 app.include_router(users.router)
 app.include_router(flights.router)
+app.include_router(coupons.router)
 app.include_router(reservations.router)
 app.include_router(logs.router)
 
