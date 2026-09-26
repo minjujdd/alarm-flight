@@ -1,10 +1,12 @@
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+import hashlib
 import random
+import secrets
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from sqlmodel import SQLModel, Field, Session, create_engine, select
 
 
@@ -89,6 +91,53 @@ class Reservation(SQLModel, table=True):
     device_id: Optional[str] = None
     user_agent: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.now)
+
+
+# -------------------------
+# 1-1. 요청/응답 모델 (DB 테이블 아님)
+# -------------------------
+
+class SignupRequest(SQLModel):
+    email: str
+    password: str
+    name: str
+    phone: Optional[str] = None
+    device_id: Optional[str] = None
+
+
+# 비밀번호 해시를 빼고 돌려주는 회원 정보
+class UserPublic(SQLModel):
+    id: int
+    email: str
+    name: str
+    phone: Optional[str]
+    is_blocked: bool
+    created_at: datetime
+
+
+class SignupResponse(SQLModel):
+    user: UserPublic
+    coupon: Coupon
+
+
+class FlightCreate(SQLModel):
+    flight_no: str
+    departure_airport: str
+    arrival_airport: str
+    departure_time: datetime
+    arrival_time: datetime
+    price: int
+    total_seats: int
+    is_special: bool = False
+    sale_open_at: Optional[datetime] = None
+
+
+class ReservationRequest(SQLModel):
+    user_id: int
+    flight_id: int
+    seat_count: int = 1
+    coupon_id: Optional[int] = None
+    device_id: Optional[str] = None
 
 
 # -------------------------
@@ -269,3 +318,251 @@ def detect(user_id: str, action: str):
         session.refresh(log)
 
         return log
+
+
+# -------------------------
+# 12. 비밀번호 해시
+# -------------------------
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode(), salt, 100_000
+    )
+    return salt.hex() + ":" + digest.hex()
+
+
+# -------------------------
+# 13. 회원가입 (+ 가입 쿠폰 자동 발급)
+# -------------------------
+
+SIGNUP_COUPON_DISCOUNT = 10000
+SIGNUP_COUPON_DAYS = 30
+
+
+@app.post("/users/signup", response_model=SignupResponse)
+def signup(data: SignupRequest, request: Request):
+
+    with Session(engine) as session:
+        exists = session.exec(
+            select(User).where(User.email == data.email)
+        ).first()
+
+        if exists:
+            raise HTTPException(400, "이미 가입된 이메일입니다")
+
+        user = User(
+            email=data.email,
+            password_hash=hash_password(data.password),
+            name=data.name,
+            phone=data.phone,
+            signup_ip=request.client.host if request.client else None,
+            signup_device_id=data.device_id
+        )
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+
+        coupon = Coupon(
+            code=secrets.token_hex(6).upper(),
+            user_id=user.id,
+            coupon_type="signup",
+            discount_amount=SIGNUP_COUPON_DISCOUNT,
+            expires_at=datetime.now() + timedelta(days=SIGNUP_COUPON_DAYS)
+        )
+        session.add(coupon)
+        session.commit()
+        session.refresh(coupon)
+
+        return SignupResponse(
+            user=UserPublic.model_validate(user),
+            coupon=coupon
+        )
+
+
+# -------------------------
+# 14. 회원 조회
+# -------------------------
+
+@app.get("/users/{user_id}", response_model=UserPublic)
+def get_user(user_id: int):
+
+    with Session(engine) as session:
+        user = session.get(User, user_id)
+
+        if not user:
+            raise HTTPException(404, "회원을 찾을 수 없습니다")
+
+        return user
+
+
+# -------------------------
+# 15. 회원 쿠폰 조회
+# -------------------------
+
+@app.get("/users/{user_id}/coupons")
+def get_user_coupons(user_id: int):
+
+    with Session(engine) as session:
+        statement = select(Coupon).where(
+            Coupon.user_id == user_id
+        )
+
+        return session.exec(statement).all()
+
+
+# -------------------------
+# 16. 회원 예약 조회
+# -------------------------
+
+@app.get("/users/{user_id}/reservations")
+def get_user_reservations(user_id: int):
+
+    with Session(engine) as session:
+        statement = select(Reservation).where(
+            Reservation.user_id == user_id
+        )
+
+        return session.exec(statement).all()
+
+
+# -------------------------
+# 17. 항공편 등록 (관리자·테스트용)
+# -------------------------
+
+@app.post("/flights")
+def create_flight(data: FlightCreate):
+
+    flight = Flight(
+        **data.model_dump(),
+        remaining_seats=data.total_seats
+    )
+
+    with Session(engine) as session:
+        session.add(flight)
+        session.commit()
+        session.refresh(flight)
+
+        return flight
+
+
+# -------------------------
+# 18. 항공편 검색
+# -------------------------
+
+@app.get("/flights")
+def search_flights(
+    departure_airport: Optional[str] = None,
+    arrival_airport: Optional[str] = None,
+    special_only: bool = False
+):
+
+    with Session(engine) as session:
+        statement = select(Flight)
+
+        if departure_airport:
+            statement = statement.where(
+                Flight.departure_airport == departure_airport
+            )
+        if arrival_airport:
+            statement = statement.where(
+                Flight.arrival_airport == arrival_airport
+            )
+        if special_only:
+            statement = statement.where(Flight.is_special == True)
+
+        return session.exec(statement).all()
+
+
+# -------------------------
+# 19. 항공편 상세 조회
+# -------------------------
+
+@app.get("/flights/{flight_id}")
+def get_flight(flight_id: int):
+
+    with Session(engine) as session:
+        flight = session.get(Flight, flight_id)
+
+        if not flight:
+            raise HTTPException(404, "항공편을 찾을 수 없습니다")
+
+        return flight
+
+
+# -------------------------
+# 20. 예약 (+ 쿠폰 사용)
+# -------------------------
+
+@app.post("/reservations")
+def create_reservation(data: ReservationRequest, request: Request):
+
+    now = datetime.now()
+
+    with Session(engine) as session:
+        user = session.get(User, data.user_id)
+        if not user:
+            raise HTTPException(404, "회원을 찾을 수 없습니다")
+        if user.is_blocked:
+            raise HTTPException(403, "차단된 회원입니다")
+
+        flight = session.get(Flight, data.flight_id)
+        if not flight:
+            raise HTTPException(404, "항공편을 찾을 수 없습니다")
+        if flight.sale_open_at and now < flight.sale_open_at:
+            raise HTTPException(400, "아직 판매가 시작되지 않았습니다")
+        if data.seat_count < 1:
+            raise HTTPException(400, "좌석 수는 1 이상이어야 합니다")
+        if flight.remaining_seats < data.seat_count:
+            raise HTTPException(400, "잔여 좌석이 부족합니다")
+
+        total_price = flight.price * data.seat_count
+
+        coupon = None
+        if data.coupon_id is not None:
+            coupon = session.get(Coupon, data.coupon_id)
+            if not coupon or coupon.user_id != user.id:
+                raise HTTPException(400, "사용할 수 없는 쿠폰입니다")
+            if coupon.used_at:
+                raise HTTPException(400, "이미 사용한 쿠폰입니다")
+            if coupon.expires_at and now > coupon.expires_at:
+                raise HTTPException(400, "만료된 쿠폰입니다")
+
+            total_price = max(total_price - coupon.discount_amount, 0)
+            coupon.used_at = now
+            session.add(coupon)
+
+        flight.remaining_seats -= data.seat_count
+        session.add(flight)
+
+        reservation = Reservation(
+            user_id=user.id,
+            flight_id=flight.id,
+            seat_count=data.seat_count,
+            total_price=total_price,
+            coupon_id=coupon.id if coupon else None,
+            request_ip=request.client.host if request.client else None,
+            device_id=data.device_id,
+            user_agent=request.headers.get("user-agent")
+        )
+        session.add(reservation)
+        session.commit()
+        session.refresh(reservation)
+
+        return reservation
+
+
+# -------------------------
+# 21. 예약 조회
+# -------------------------
+
+@app.get("/reservations/{reservation_id}")
+def get_reservation(reservation_id: int):
+
+    with Session(engine) as session:
+        reservation = session.get(Reservation, reservation_id)
+
+        if not reservation:
+            raise HTTPException(404, "예약을 찾을 수 없습니다")
+
+        return reservation
