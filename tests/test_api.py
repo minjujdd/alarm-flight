@@ -114,7 +114,7 @@ def test_reservation_validation_errors(client):
 def test_get_reservation(client):
     uid = signup(client, "a@test.com")["user"]["id"]
     fid = make_flight(client)["id"]
-    rid = reserve(client, uid, fid).json()["id"]
+    rid = reserve(client, uid, fid).json()["reservation"]["id"]
 
     assert client.get(f"/reservations/{rid}").status_code == 200
     assert client.get("/reservations/999").status_code == 404

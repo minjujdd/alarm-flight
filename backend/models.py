@@ -18,6 +18,14 @@ class Action:
     RESERVATION_CANCELLED = "RESERVATION_CANCELLED"
 
 
+# Reservation.status 값 (앞의 세 개가 탐지 판정 결과)
+class Status:
+    CONFIRMED = "CONFIRMED"
+    CAPTCHA_REQUIRED = "CAPTCHA_REQUIRED"
+    BLOCKED = "BLOCKED"
+    CANCELLED = "CANCELLED"
+
+
 # -------------------------
 # 1. DB 테이블
 # -------------------------
@@ -82,9 +90,18 @@ class Reservation(SQLModel, table=True):
     seat_count: int = 1
     total_price: int
     coupon_id: Optional[int] = Field(default=None, foreign_key="coupons.id")
-    # confirmed, captcha_required, blocked, cancelled
-    status: str = "confirmed"
-    risk_score: Optional[float] = None
+    status: str = Field(default=Status.CONFIRMED, index=True)
+
+    # 탐지 결과
+    rule_score: float = 0
+    ai_score: Optional[float] = None
+    risk_score: float = 0
+    reasons: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+
+    # 모의 CAPTCHA (정답은 응답에 포함하지 않음)
+    captcha_question: Optional[str] = None
+    captcha_answer: Optional[str] = None
+
     # 봇 탐지용: 예약 요청 당시 IP·기기 정보
     request_ip: Optional[str] = None
     device_id: Optional[str] = None
@@ -168,6 +185,42 @@ class ReservationRequest(SQLModel):
     seat_count: int = 1
     coupon_id: Optional[int] = None
     device_id: Optional[str] = None
+
+
+# captcha_answer 를 뺀 예약 정보
+class ReservationPublic(SQLModel):
+    id: int
+    user_id: int
+    flight_id: int
+    seat_count: int
+    total_price: int
+    coupon_id: Optional[int]
+    status: str
+    rule_score: float
+    ai_score: Optional[float]
+    risk_score: float
+    reasons: list[str]
+    captcha_question: Optional[str]
+    request_ip: Optional[str]
+    device_id: Optional[str]
+    user_agent: Optional[str]
+    created_at: datetime
+
+
+# 예약 요청 결과 (프론트는 decision 으로 화면 분기)
+class ReservationResult(SQLModel):
+    decision: str
+    message: str
+    rule_score: float
+    ai_score: Optional[float]
+    risk_score: float
+    reasons: list[str]
+    captcha_question: Optional[str] = None
+    reservation: ReservationPublic
+
+
+class CaptchaRequest(SQLModel):
+    answer: str
 
 
 class CouponIssueRequest(SQLModel):

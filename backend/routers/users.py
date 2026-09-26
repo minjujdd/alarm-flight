@@ -8,8 +8,8 @@ from sqlmodel import Session, select
 from database import get_session
 from events import client_ip, write_log
 from models import (
-    Action, Coupon, Reservation, SignupRequest, SignupResponse, User,
-    UserPublic
+    Action, Coupon, Reservation, ReservationPublic, SignupRequest,
+    SignupResponse, User, UserPublic
 )
 from routers.coupons import issue_coupon
 
@@ -110,7 +110,10 @@ def get_user_coupons(user_id: int, session: Session = Depends(get_session)):
 
 
 # 회원 예약 조회
-@router.get("/users/{user_id}/reservations")
+@router.get(
+    "/users/{user_id}/reservations",
+    response_model=list[ReservationPublic]
+)
 def get_user_reservations(
     user_id: int,
     session: Session = Depends(get_session)
