@@ -1,9 +1,14 @@
 from contextlib import asynccontextmanager
+import os
 
 from fastapi import FastAPI
 
 from database import create_db_and_tables
-from routers import coupons, flights, logs, reservations, users
+from routers import coupons, demo, flights, logs, reservations, users
+
+
+# 시연용 API(/demo) 사용 여부. 끄려면 DEMO_MODE=0
+DEMO_MODE = os.getenv("DEMO_MODE", "1") == "1"
 
 
 @asynccontextmanager
@@ -22,6 +27,9 @@ app.include_router(flights.router)
 app.include_router(coupons.router)
 app.include_router(reservations.router)
 app.include_router(logs.router)
+
+if DEMO_MODE:
+    app.include_router(demo.router)
 
 
 # 서버 동작 확인
