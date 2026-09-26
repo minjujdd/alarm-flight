@@ -2,11 +2,15 @@ from typing import Optional
 import random
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlmodel import Session, select
+from sqlmodel import Session, func, select
 
+import risk
 from database import get_session
 from events import client_ip, write_log
-from models import EventLog, LogCreate, User
+from models import (
+    Action, EventLog, LogCreate, Reservation, Status, User, UserPublic
+)
+from rule_engine import RULES
 
 
 router = APIRouter(tags=["관리자: 로그·통계"])
@@ -74,33 +78,126 @@ def get_anomaly_logs(
     return session.exec(statement).all()
 
 
-# 로그 통계 조회
+def rate(part: int, total: int) -> float:
+    return round(part / total * 100, 1) if total else 0
+
+
+def count_by(session, column, model) -> dict:
+    rows = session.exec(
+        select(column, func.count()).select_from(model).group_by(column)
+    ).all()
+    return {key: count for key, count in rows}
+
+
+# 대시보드용 통계
 @router.get("/stats")
 def get_stats(session: Session = Depends(get_session)):
 
     logs = session.exec(select(EventLog)).all()
 
-    # 전체 로그 수
+    # 전체 로그 기준
     total_logs = len(logs)
+    anomaly_logs = sum(1 for log in logs if log.is_anomaly)
 
-    # 이상 로그 수
-    anomaly_logs = sum(
-        1 for log in logs if log.is_anomaly
+    # 예약 요청(탐지 수행) 기준
+    attempts = [
+        log for log in logs if log.action == Action.RESERVATION_ATTEMPT
+    ]
+    anomaly_attempts = sum(1 for log in attempts if log.is_anomaly)
+
+    by_decision = {
+        Status.CONFIRMED: 0, Status.CAPTCHA_REQUIRED: 0, Status.BLOCKED: 0
+    }
+    rule_hits = {code: 0 for code in RULES}
+    for log in attempts:
+        by_decision[log.decision] = by_decision.get(log.decision, 0) + 1
+        for reason in log.reasons or []:
+            code = reason.split("(")[0]
+            rule_hits[code] = rule_hits.get(code, 0) + 1
+
+    by_status = {
+        Status.CONFIRMED: 0, Status.CAPTCHA_REQUIRED: 0,
+        Status.BLOCKED: 0, Status.CANCELLED: 0
+    }
+    by_status.update(count_by(session, Reservation.status, Reservation))
+
+    avg_risk = (
+        round(sum(log.risk_score for log in attempts) / len(attempts), 1)
+        if attempts else 0
     )
 
-    # 이상 비율
-    if total_logs > 0:
-        anomaly_rate = round(
-            anomaly_logs / total_logs * 100, 1
-        )
-    else:
-        anomaly_rate = 0
-
     return {
+        # 기존 키 (전체 로그 기준)
         "total_logs": total_logs,
         "anomaly_logs": anomaly_logs,
-        "anomaly_rate": anomaly_rate
+        "anomaly_rate": rate(anomaly_logs, total_logs),
+
+        "total_users": session.exec(
+            select(func.count()).select_from(User)
+        ).one(),
+        "blocked_users": session.exec(
+            select(func.count()).select_from(User)
+            .where(User.is_blocked == True)
+        ).one(),
+
+        # 예약 (현재 상태 기준, CAPTCHA 통과 시 CONFIRMED 로 바뀜)
+        "reservations": {
+            "total": sum(by_status.values()),
+            "by_status": by_status,
+        },
+
+        # 탐지 (예약 요청 시점 판정 기준)
+        "detection": {
+            "total_attempts": len(attempts),
+            "anomaly_count": anomaly_attempts,
+            "anomaly_rate": rate(anomaly_attempts, len(attempts)),
+            "by_decision": by_decision,
+            "avg_risk_score": avg_risk,
+            "rule_hits": rule_hits,
+            "rejected_requests": sum(
+                1 for log in logs
+                if log.action == Action.RESERVATION_REJECTED
+            ),
+        },
+
+        "logs_by_action": count_by(session, EventLog.action, EventLog),
     }
+
+
+# 현재 탐지 규칙·판정 기준 조회
+@router.get("/rules")
+def get_rules():
+    return {
+        "rules": RULES,
+        "thresholds": {
+            "captcha": risk.CAPTCHA_THRESHOLD,
+            "block": risk.BLOCK_THRESHOLD,
+        },
+        "weights": {
+            "rule": risk.RULE_WEIGHT,
+            "ai": risk.AI_WEIGHT,
+        },
+    }
+
+
+# 회원 차단 / 해제 (관리자)
+@router.post("/users/{user_id}/block", response_model=UserPublic)
+def block_user(
+    user_id: int,
+    blocked: bool = True,
+    session: Session = Depends(get_session)
+):
+
+    user = session.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "회원을 찾을 수 없습니다")
+
+    user.is_blocked = blocked
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+
+    return user
 
 
 # 특정 사용자 로그 조회 (최신순)
