@@ -1,4 +1,6 @@
+from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 import random
 
@@ -14,7 +16,7 @@ class EventLog(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     timestamp: datetime = Field(default_factory=datetime.now)
     user_id: str
-    action: strr
+    action: str
     score: float
     is_anomaly: bool
 
@@ -23,7 +25,8 @@ class EventLog(SQLModel, table=True):
 # 2. SQLite 연결
 # -------------------------
 
-sqlite_file_name = "app.db"
+# 실행 위치와 관계없이 항상 backend/app.db 를 사용
+sqlite_file_name = Path(__file__).resolve().parent / "app.db"
 sqlite_url = f"sqlite:///{sqlite_file_name}"
 
 connect_args = {
@@ -48,14 +51,16 @@ def create_db_and_tables():
 # 4. FastAPI 실행
 # -------------------------
 
-app = FastAPI(
-    title="AI 이상행동 탐지 API"
-)
-
-
-@app.on_event("startup")
-def on_startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     create_db_and_tables()
+    yield
+
+
+app = FastAPI(
+    title="AI 이상행동 탐지 API",
+    lifespan=lifespan
+)
 
 
 # -------------------------
@@ -99,7 +104,75 @@ def get_logs():
 
 
 # -------------------------
-# 8. 임시 이상행동 탐지
+# 8. 이상 로그만 조회
+# -------------------------
+
+@app.get("/logs/anomalies")
+def get_anomaly_logs():
+
+    with Session(engine) as session:
+        statement = select(EventLog).where(
+            EventLog.is_anomaly == True
+        )
+
+        logs = session.exec(statement).all()
+
+        return logs
+
+
+# -------------------------
+# 9. 로그 통계 조회
+# -------------------------
+
+@app.get("/stats")
+def get_stats():
+
+    with Session(engine) as session:
+        statement = select(EventLog)
+        logs = session.exec(statement).all()
+
+        # 전체 로그 수
+        total_logs = len(logs)
+
+        # 이상 로그 수
+        anomaly_logs = sum(
+            1 for log in logs if log.is_anomaly
+        )
+
+        # 이상 비율
+        if total_logs > 0:
+            anomaly_rate = round(
+                anomaly_logs / total_logs * 100, 1
+            )
+        else:
+            anomaly_rate = 0
+
+        return {
+            "total_logs": total_logs,
+            "anomaly_logs": anomaly_logs,
+            "anomaly_rate": anomaly_rate
+        }
+
+
+# -------------------------
+# 10. 특정 사용자 로그 조회
+# -------------------------
+
+@app.get("/logs/user/{user_id}")
+def get_user_logs(user_id: str):
+
+    with Session(engine) as session:
+        statement = select(EventLog).where(
+            EventLog.user_id == user_id
+        )
+
+        logs = session.exec(statement).all()
+
+        return logs
+
+
+# -------------------------
+# 11. 임시 이상행동 탐지
 # -------------------------
 
 @app.post("/detect")
